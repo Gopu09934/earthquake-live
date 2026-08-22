@@ -31,6 +31,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
     libatspi2.0-0 \
+    libgl1 \
+    libegl1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
