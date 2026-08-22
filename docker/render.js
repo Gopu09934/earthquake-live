@@ -41,12 +41,21 @@ async function main() {
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
-      "--disable-gpu",
       "--disable-infobars",
       "--disable-session-crashed-bubble",
       "--noerrdialogs",
       "--autoplay-policy=no-user-gesture-required",
       "--force-device-scale-factor=1",
+      // The dashboard now renders the Earth with WebGL. This container has
+      // no real GPU, so force Chromium onto its bundled software
+      // rasterizer (SwiftShader) instead of the hardware path that
+      // "--disable-gpu" used to force us onto — that used to disable
+      // WebGL outright and leave the globe blank on stream.
+      "--use-gl=angle",
+      "--use-angle=swiftshader",
+      "--enable-webgl",
+      "--ignore-gpu-blocklist",
+      "--enable-unsafe-swiftshader",
     ],
   });
 
