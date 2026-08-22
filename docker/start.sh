@@ -107,6 +107,8 @@ while [ "$attempt" -le "$MAX_RETRIES" ]; do
     ffmpeg \
         -hide_banner \
         -loglevel warning \
+        -stats \
+        -nostdin \
         -f x11grab -video_size "${WIDTH}x${HEIGHT}" -framerate "${FPS}" -i "${DISPLAY}.0" \
         "${AUDIO_INPUT_ARGS[@]}" \
         -c:v libx264 \
@@ -126,6 +128,7 @@ while [ "$attempt" -le "$MAX_RETRIES" ]; do
         -map 0:v \
         -map "${AUDIO_MAP}" \
         -f flv \
+        -rtmp_conntimeout 10 \
         "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
     exit_code=$?
     set -e
