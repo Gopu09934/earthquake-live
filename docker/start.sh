@@ -128,7 +128,6 @@ while [ "$attempt" -le "$MAX_RETRIES" ]; do
         -map 0:v \
         -map "${AUDIO_MAP}" \
         -f flv \
-        -rtmp_conntimeout 10 \
         "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
     exit_code=$?
     set -e
