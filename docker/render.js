@@ -17,7 +17,7 @@ const URL = process.env.DASHBOARD_URL || "http://localhost:8080/index.html";
 async function gotoWithRetry(page, attempts = 15) {
   for (let i = 1; i <= attempts; i++) {
     try {
-      await page.goto(URL, { waitUntil: "networkidle2", timeout: 15000 });
+      await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 15000 });
       console.log(`[render] Dashboard loaded on attempt ${i}.`);
       return;
     } catch (err) {
