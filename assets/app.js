@@ -31,27 +31,8 @@
     },
   };
 
-  const COUNTRIES_URL = "data/countries.min.geojson";
   const REFRESH_MS = 60_000;      // re-poll live feed every 60s
   const NEW_QUAKE_WINDOW_MS = 15 * 60_000; // "new" ripple badge window
-
-  const OCEAN_LABELS = [
-    { name: "PACIFIC OCEAN", lon: -150, lat: 5 },
-    { name: "PACIFIC OCEAN", lon: 170, lat: -10 },
-    { name: "ATLANTIC OCEAN", lon: -32, lat: 10 },
-    { name: "INDIAN OCEAN", lon: 75, lat: -25 },
-    { name: "ARCTIC OCEAN", lon: 0, lat: 85 },
-    { name: "SOUTHERN OCEAN", lon: 0, lat: -68 },
-  ];
-
-  const REGION_LABELS = [
-    { name: "NORTH AMERICA", lon: -100, lat: 45 },
-    { name: "SOUTH AMERICA", lon: -60, lat: -15 },
-    { name: "EUROPE", lon: 15, lat: 52 },
-    { name: "AFRICA", lon: 20, lat: 5 },
-    { name: "ASIA", lon: 95, lat: 50 },
-    { name: "OCEANIA", lon: 140, lat: -25 },
-  ];
 
   /* ---------------------------------------------------------------------
      State
@@ -61,15 +42,9 @@
     feedKey: "day",
     minMag: 2.5,
     features: [],       // currently loaded, unfiltered
-    countries: null,
     focusedId: null,
     lastSync: null,      // Date
     isLive: false,
-    rotation: [-10, -18],
-    scale0: 0,
-    dragging: false,
-    autoRotate: true,
-    lastPointer: null,
   };
 
   /* ---------------------------------------------------------------------
@@ -83,7 +58,14 @@
     if (mag >= 6) return "#ff5468";
     if (mag >= 5) return "#ffb238";
     if (mag >= 4) return "#3fd8c4";
-    return "#5c6478";
+    return "#7d8aa8";
+  }
+
+  function magColorHex(mag) {
+    if (mag >= 6) return 0xff5468;
+    if (mag >= 5) return 0xffb238;
+    if (mag >= 4) return 0x3fd8c4;
+    return 0x7d8aa8;
   }
 
   function magRadius(mag) {
@@ -104,6 +86,30 @@
   function fmtDepth(km) {
     if (km == null || isNaN(km)) return "—";
     return `${km.toFixed(0)} km`;
+  }
+
+  // Smoothly animates a number counter's textContent from its current
+  // displayed value to `to`. Used so the sidebar reads like a live
+  // instrument rather than a page that just re-renders.
+  function animateNumber(el, to, { decimals = 0, prefix = "", suffix = "" } = {}) {
+    if (!el) return;
+    const from = parseFloat(el.dataset.animVal || "0") || 0;
+    if (Math.abs(from - to) < 0.001) {
+      el.textContent = `${prefix}${to.toFixed(decimals)}${suffix}`;
+      el.dataset.animVal = String(to);
+      return;
+    }
+    const dur = 550;
+    const start = performance.now();
+    function step(ts) {
+      const t = clamp((ts - start) / dur, 0, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const val = from + (to - from) * eased;
+      el.textContent = `${prefix}${val.toFixed(decimals)}${suffix}`;
+      if (t < 1) requestAnimationFrame(step);
+      else el.dataset.animVal = String(to);
+    }
+    requestAnimationFrame(step);
   }
 
   /* ---------------------------------------------------------------------
@@ -142,301 +148,405 @@
     }
   }
 
-  async function loadCountries() {
-    try {
-      const data = await fetchJSON(COUNTRIES_URL, { timeoutMs: 15000 });
-      return data;
-    } catch (err) {
-      console.error("Failed to load countries geojson:", err.message);
-      return { type: "FeatureCollection", features: [] };
-    }
-  }
-
   /* ---------------------------------------------------------------------
-     Globe / map module
+     Globe module — realistic textured 3-D Earth (Three.js / WebGL)
      --------------------------------------------------------------------- */
 
   const Globe = (() => {
-    let svg, gGraticule, gCountries, gRegionLabels, gOceanLabels, gCountryLabels, gQuakes, projection, path, geoGraticule;
+    const TEX_BASE =
+      "https://raw.githubusercontent.com/mrdoob/three.js/r128/examples/textures/planets/";
+    const EARTH_R = 1;
+
+    let renderer, scene, camera, earthGroup, cloudsMesh, markersGroup;
+    let raycaster, pointerNDC;
+    let panelEl, canvasEl;
     let width = 0, height = 0;
 
-    function size() {
-      const panel = $("#mapPanel");
-      width = panel.clientWidth;
-      height = panel.clientHeight;
-      const svgEl = $("#globe");
-      svgEl.setAttribute("viewBox", `0 0 ${width} ${height}`);
-      const R = Math.min(width, height) / 2 - 26;
-      if (!state.scale0) state.scale0 = R;
-      projection
-        .translate([width / 2, height / 2])
-        .scale(state.scale0);
+    let glowTexture, ringTexture;
+    let markerMeshes = [];
+
+    let initialQuat = null;
+    let focusAnim = null;         // { startQuat, targetQuat, start, dur }
+    let autoRotateEnabled = true;
+    let dragging = false, hovering = false, dragMoved = false;
+    let lastX = 0, lastY = 0;
+    let velYaw = 0, velPitch = 0;
+
+    const DEFAULT_ZOOM = 3.05;
+    let zoomDist = DEFAULT_ZOOM;
+    const ZOOM_MIN = 1.85, ZOOM_MAX = 5.4;
+
+    const clock = new THREE.Clock();
+
+    function latLonToVec3(lat, lon, r) {
+      const phi = (90 - lat) * (Math.PI / 180);
+      const theta = (lon + 180) * (Math.PI / 180);
+      return new THREE.Vector3(
+        -r * Math.sin(phi) * Math.cos(theta),
+        r * Math.cos(phi),
+        r * Math.sin(phi) * Math.sin(theta)
+      );
+    }
+
+    function makeGlowTexture() {
+      const size = 128;
+      const c = document.createElement("canvas");
+      c.width = c.height = size;
+      const ctx = c.getContext("2d");
+      const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+      g.addColorStop(0, "rgba(255,255,255,1)");
+      g.addColorStop(0.32, "rgba(255,255,255,0.9)");
+      g.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, size, size);
+      const tex = new THREE.CanvasTexture(c);
+      tex.needsUpdate = true;
+      return tex;
+    }
+
+    function makeRingTexture() {
+      const size = 128;
+      const c = document.createElement("canvas");
+      c.width = c.height = size;
+      const ctx = c.getContext("2d");
+      for (let i = 0; i < 5; i++) {
+        const rr = size / 2 - 4 - i * 3;
+        ctx.beginPath();
+        ctx.strokeStyle = `rgba(255,255,255,${0.5 - i * 0.09})`;
+        ctx.lineWidth = 2.4;
+        ctx.arc(size / 2, size / 2, rr, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.needsUpdate = true;
+      return tex;
+    }
+
+    function makeStarfield() {
+      const N = 3400;
+      const pos = new Float32Array(N * 3);
+      for (let i = 0; i < N; i++) {
+        const r = 30 + Math.random() * 55;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        pos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+        pos[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+        pos[i * 3 + 2] = r * Math.cos(phi);
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      const mat = new THREE.PointsMaterial({
+        color: 0xdfe8ff,
+        size: 0.05,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.8,
+        depthWrite: false,
+      });
+      return new THREE.Points(geo, mat);
+    }
+
+    function makeAtmosphere() {
+      const geo = new THREE.SphereGeometry(EARTH_R * 1.16, 64, 64);
+      const mat = new THREE.ShaderMaterial({
+        vertexShader: `
+          varying vec3 vNormal;
+          void main() {
+            vNormal = normalize(normalMatrix * normal);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }`,
+        fragmentShader: `
+          varying vec3 vNormal;
+          void main() {
+            float intensity = pow(0.64 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 3.2);
+            gl_FragColor = vec4(0.35, 0.66, 1.0, 1.0) * clamp(intensity, 0.0, 1.0);
+          }`,
+        blending: THREE.AdditiveBlending,
+        side: THREE.BackSide,
+        transparent: true,
+        depthWrite: false,
+      });
+      return new THREE.Mesh(geo, mat);
     }
 
     function init() {
-      svg = d3.select("#globe");
-      projection = d3.geoOrthographic().clipAngle(90).rotate(state.rotation);
-      path = d3.geoPath(projection);
-      geoGraticule = d3.geoGraticule10();
+      panelEl = $("#mapPanel");
+      canvasEl = $("#globeCanvas");
+      width = panelEl.clientWidth;
+      height = panelEl.clientHeight;
 
-      const defs = svg.append("defs");
-      const grad = defs.append("radialGradient").attr("id", "oceanGrad");
-      grad.append("stop").attr("offset", "0%").attr("stop-color", "#141a26");
-      grad.append("stop").attr("offset", "100%").attr("stop-color", "#080a10");
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 100);
+      camera.position.set(0, 0, zoomDist);
 
-      svg.append("circle").attr("class", "sphere-fill").attr("fill", "url(#oceanGrad)");
-      gGraticule = svg.append("path").attr("class", "graticule")
-        .attr("fill", "none").attr("stroke", "#1c2431").attr("stroke-width", 0.6);
-      gCountries = svg.append("g").attr("class", "countries");
-      gRegionLabels = svg.append("g").attr("class", "region-labels");
-      gOceanLabels = svg.append("g").attr("class", "ocean-labels");
-      gCountryLabels = svg.append("g").attr("class", "country-labels");
-      gQuakes = svg.append("g").attr("class", "quakes");
-      svg.append("circle").attr("class", "sphere-outline")
-        .attr("fill", "none").attr("stroke", "#2a3244").attr("stroke-width", 1.2);
+      renderer = new THREE.WebGLRenderer({ canvas: canvasEl, antialias: true, alpha: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setSize(width, height, false);
+      if ("outputEncoding" in renderer) renderer.outputEncoding = THREE.sRGBEncoding;
 
-      size();
-      redrawStatic();
+      scene.add(new THREE.AmbientLight(0x8fa6d0, 0.68));
+      const sun = new THREE.DirectionalLight(0xffffff, 1.25);
+      sun.position.set(5, 2.4, 3.2);
+      scene.add(sun);
+
+      scene.add(makeStarfield());
+      scene.add(makeAtmosphere());
+
+      earthGroup = new THREE.Group();
+      const initEuler = new THREE.Euler(-0.24, 0.4, 0, "XYZ");
+      initialQuat = new THREE.Quaternion().setFromEuler(initEuler);
+      earthGroup.quaternion.copy(initialQuat);
+      scene.add(earthGroup);
+
+      const loader = new THREE.TextureLoader();
+      loader.crossOrigin = "anonymous";
+      const dayMap = loader.load(TEX_BASE + "earth_atmos_2048.jpg");
+      const specMap = loader.load(TEX_BASE + "earth_specular_2048.jpg");
+      const normalMap = loader.load(TEX_BASE + "earth_normal_2048.jpg");
+      const cloudsMap = loader.load(TEX_BASE + "earth_clouds_1024.png");
+      if ("sRGBEncoding" in THREE) dayMap.encoding = THREE.sRGBEncoding;
+
+      const earthGeo = new THREE.SphereGeometry(EARTH_R, 96, 96);
+      const earthMat = new THREE.MeshPhongMaterial({
+        map: dayMap,
+        specularMap: specMap,
+        specular: new THREE.Color(0x2b3040),
+        shininess: 14,
+        normalMap: normalMap,
+        normalScale: new THREE.Vector2(0.55, 0.55),
+      });
+      const earthMesh = new THREE.Mesh(earthGeo, earthMat);
+      earthGroup.add(earthMesh);
+
+      const cloudGeo = new THREE.SphereGeometry(EARTH_R * 1.008, 96, 96);
+      const cloudMat = new THREE.MeshLambertMaterial({
+        map: cloudsMap,
+        transparent: true,
+        opacity: 0.32,
+        depthWrite: false,
+      });
+      cloudsMesh = new THREE.Mesh(cloudGeo, cloudMat);
+      earthGroup.add(cloudsMesh);
+
+      // Faint scientific-instrument graticule, hugging the surface.
+      const gridGeo = new THREE.SphereGeometry(EARTH_R * 1.002, 24, 16);
+      const gridEdges = new THREE.EdgesGeometry(gridGeo, 1);
+      const grid = new THREE.LineSegments(
+        gridEdges,
+        new THREE.LineBasicMaterial({ color: 0x3fd8c4, transparent: true, opacity: 0.05 })
+      );
+      earthGroup.add(grid);
+
+      markersGroup = new THREE.Group();
+      earthGroup.add(markersGroup);
+
+      glowTexture = makeGlowTexture();
+      ringTexture = makeRingTexture();
+
+      raycaster = new THREE.Raycaster();
+      if (raycaster.params.Sprite) raycaster.params.Sprite.threshold = 0.04;
+      pointerNDC = new THREE.Vector2();
+
       wireInteraction();
-      window.addEventListener("resize", () => { size(); redrawStatic(); redrawQuakes(); });
-      requestAnimationFrame(tick);
+      onResize();
+      window.addEventListener("resize", onResize);
+      requestAnimationFrame(animate);
     }
 
-    function redrawStatic() {
-      const cx = width / 2, cy = height / 2, R = projection.scale();
-      svg.select(".sphere-fill").attr("cx", cx).attr("cy", cy).attr("r", R);
-      svg.select(".sphere-outline").attr("cx", cx).attr("cy", cy).attr("r", R);
-      gGraticule.attr("d", path(geoGraticule));
-      gCountries.selectAll("path")
-        .data(state.countries ? state.countries.features : [], (d) => d.properties && d.properties.iso_a3 || d.id)
-        .join("path")
-        .attr("fill", "#2e3852")
-        .attr("stroke", "#4a5878")
-        .attr("stroke-width", 0.6)
-        .attr("d", path);
-
-      // Region (continent) labels — coarse background text, always shown when facing us
-      gRegionLabels.selectAll("text")
-        .data(REGION_LABELS.filter((d) => visible([d.lon, d.lat])), (d) => d.name)
-        .join("text")
-        .text((d) => d.name)
-        .attr("x", (d) => projection([d.lon, d.lat])[0])
-        .attr("y", (d) => projection([d.lon, d.lat])[1])
-        .attr("text-anchor", "middle")
-        .attr("font-size", 13)
-        .attr("font-weight", 600)
-        .attr("letter-spacing", "1.5px")
-        .attr("fill", "#6b7aa0")
-        .attr("stroke", "#0a0d14")
-        .attr("stroke-width", 3)
-        .attr("paint-order", "stroke")
-        .attr("opacity", 0.6)
-        .style("pointer-events", "none");
-
-      // Ocean labels — same idea, italic to read as water rather than landmass
-      gOceanLabels.selectAll("text")
-        .data(OCEAN_LABELS.filter((d) => visible([d.lon, d.lat])), (d) => d.name + d.lon)
-        .join("text")
-        .text((d) => d.name)
-        .attr("x", (d) => projection([d.lon, d.lat])[0])
-        .attr("y", (d) => projection([d.lon, d.lat])[1])
-        .attr("text-anchor", "middle")
-        .attr("font-size", 11)
-        .attr("font-style", "italic")
-        .attr("letter-spacing", "1px")
-        .attr("fill", "#4d5f85")
-        .attr("stroke", "#0a0d14")
-        .attr("stroke-width", 3)
-        .attr("paint-order", "stroke")
-        .attr("opacity", 0.65)
-        .style("pointer-events", "none");
-
-      // Country name labels — only for countries with enough projected screen
-      // area to stay legible; fades/grows in as you zoom toward a country.
-      const labelData = (state.countryCentroids || [])
-        .map((d) => ({ ...d, area: path.area(d.f) }))
-        .filter((d) => d.area > 300 && visible(d.centroid))
-        .sort((a, b) => b.area - a.area)
-        .slice(0, 60);
-
-      gCountryLabels.selectAll("text")
-        .data(labelData, (d) => d.f.properties.iso_a3 || d.f.id)
-        .join("text")
-        .text((d) => d.f.properties.name)
-        .attr("x", (d) => projection(d.centroid)[0])
-        .attr("y", (d) => projection(d.centroid)[1])
-        .attr("text-anchor", "middle")
-        .attr("font-size", (d) => clamp(Math.sqrt(d.area) / 9, 8, 14))
-        .attr("fill", "#c3cee4")
-        .attr("stroke", "#0a0d14")
-        .attr("stroke-width", 2.5)
-        .attr("paint-order", "stroke")
-        .attr("opacity", (d) => clamp((d.area - 300) / 4000, 0.4, 0.95))
-        .style("pointer-events", "none");
+    function onResize() {
+      width = panelEl.clientWidth;
+      height = panelEl.clientHeight;
+      if (!width || !height) return;
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+      renderer.setSize(width, height, false);
     }
 
-    function visible(coords) {
-      const r = projection.rotate();
-      const center = [-r[0], -r[1]];
-      return d3.geoDistance(coords, center) < Math.PI / 2 - 0.02;
+    /* ---------------- markers ---------------- */
+
+    function magSize(mag) {
+      return clamp(0.02 + Math.sqrt(Math.max(mag, 0.1)) * 0.013, 0.024, 0.088);
     }
 
-    function redrawQuakes() {
-      const feats = getVisibleFilteredFeatures();
+    function disposeMarker(m) {
+      [m.core, m.beam].forEach((mesh) => {
+        if (!mesh) return;
+        mesh.geometry.dispose();
+        mesh.material.dispose();
+      });
+    }
 
-      const sel = gQuakes.selectAll("g.quake")
-        .data(feats, (d) => d.id || d.properties.time);
+    function clearMarkers() {
+      markerMeshes.forEach((m) => {
+        markersGroup.remove(m.group);
+        disposeMarker(m);
+      });
+      markerMeshes = [];
+    }
 
-      const enter = sel.enter().append("g").attr("class", "quake");
-      enter.append("circle").attr("class", "ripple");
-      enter.append("circle").attr("class", "core");
+    function buildMarkers(features) {
+      clearMarkers();
+      const now = Date.now();
+      features.forEach((f) => {
+        const [lon, lat] = f.geometry.coordinates;
+        const mag = f.properties.mag || 0;
+        const color = magColorHex(mag);
+        const size = magSize(mag);
+        const pos = latLonToVec3(lat, lon, EARTH_R * 1.004);
+        const normal = pos.clone().normalize();
 
-      sel.exit().remove();
+        const group = new THREE.Group();
+        group.position.copy(pos);
 
-      const merged = enter.merge(sel);
+        const glowMat = new THREE.SpriteMaterial({
+          map: glowTexture, color, transparent: true,
+          depthWrite: false, blending: THREE.AdditiveBlending,
+        });
+        const glow = new THREE.Sprite(glowMat);
+        const baseGlowScale = size * 2.7;
+        glow.scale.set(baseGlowScale, baseGlowScale, 1);
+        group.add(glow);
 
-      merged.each(function (d) {
-        const coords = d.geometry.coordinates;
-        const p = projection([coords[0], coords[1]]);
-        const g = d3.select(this);
-        const isVisible = visible([coords[0], coords[1]]);
-        g.style("display", isVisible ? null : "none");
-        if (!isVisible || !p) return;
+        const coreGeo = new THREE.CircleGeometry(size * 0.5, 16);
+        const coreMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95 });
+        const core = new THREE.Mesh(coreGeo, coreMat);
+        core.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+        group.add(core);
 
-        const mag = d.properties.mag || 0;
-        const r = magRadius(mag);
-        const isNew = Date.now() - d.properties.time < NEW_QUAKE_WINDOW_MS;
-        const isFocused = state.focusedId === d.id;
-
-        g.attr("transform", `translate(${p[0]},${p[1]})`);
-
-        const core = g.select("circle.core")
-          .attr("r", r)
-          .attr("fill", magColor(mag))
-          .attr("fill-opacity", 0.88)
-          .attr("stroke", isFocused ? "#fff" : "#000")
-          .attr("stroke-opacity", isFocused ? 0.9 : 0.35)
-          .attr("stroke-width", isFocused ? 2 : 0.7)
-          .style("cursor", "pointer");
-
-        const ripple = g.select("circle.ripple")
-          .attr("r", r)
-          .attr("fill", "none")
-          .attr("stroke", magColor(mag));
-
+        const isNew = now - f.properties.time < NEW_QUAKE_WINDOW_MS;
+        let ring = null;
         if (isNew) {
-          ripple.classed("pulse-anim", true).style("display", null);
-        } else {
-          ripple.classed("pulse-anim", false).style("display", "none");
+          const ringMat = new THREE.SpriteMaterial({
+            map: ringTexture, color, transparent: true,
+            depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.9,
+          });
+          ring = new THREE.Sprite(ringMat);
+          const baseRingScale = size * 2.2;
+          ring.scale.set(baseRingScale, baseRingScale, 1);
+          ring.userData.base = baseRingScale;
+          group.add(ring);
         }
+
+        let beam = null;
+        if (mag >= 5) {
+          const beamHeight = 0.05 + (mag - 5) * 0.045;
+          const beamGeo = new THREE.CylinderGeometry(size * 0.1, size * 0.26, beamHeight, 10, 1, true);
+          const beamMat = new THREE.MeshBasicMaterial({
+            color, transparent: true, opacity: 0.32,
+            blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+          });
+          beam = new THREE.Mesh(beamGeo, beamMat);
+          beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
+          beam.position.copy(normal.clone().multiplyScalar(beamHeight / 2));
+          group.add(beam);
+        }
+
+        markersGroup.add(group);
+        markerMeshes.push({
+          feature: f, id: f.id, group, glow, core, ring, beam,
+          baseGlowScale, phase: Math.random() * Math.PI * 2,
+          ringStart: performance.now() - Math.random() * 2200,
+        });
+      });
+    }
+
+    function getFiltered() {
+      return state.features.filter((f) => (f.properties.mag || 0) >= state.minMag);
+    }
+
+    function refresh() {
+      buildMarkers(getFiltered());
+    }
+
+    /* ---------------- interaction ---------------- */
+
+    function wireInteraction() {
+      const el = canvasEl;
+      el.style.touchAction = "none";
+
+      el.addEventListener("pointerdown", (e) => {
+        dragging = true;
+        dragMoved = false;
+        lastX = e.clientX;
+        lastY = e.clientY;
+        velYaw = 0; velPitch = 0;
+        try { el.setPointerCapture(e.pointerId); } catch (_) {}
       });
 
-      merged.on("click", (event, d) => focusQuake(d));
+      el.addEventListener("pointermove", (e) => {
+        if (!dragging) return;
+        const dx = e.clientX - lastX;
+        const dy = e.clientY - lastY;
+        if (Math.abs(dx) + Math.abs(dy) > 2) dragMoved = true;
+        const s = 0.0052;
+        const qYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), dx * s);
+        const qPitch = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), dy * s);
+        earthGroup.quaternion.premultiply(qYaw).premultiply(qPitch);
+        velYaw = dx * s * 0.5;
+        velPitch = dy * s * 0.5;
+        lastX = e.clientX;
+        lastY = e.clientY;
+        focusAnim = null;
+      });
+
+      el.addEventListener("pointerup", (e) => {
+        dragging = false;
+        if (!dragMoved) handlePick(e);
+      });
+      el.addEventListener("pointercancel", () => (dragging = false));
+      el.addEventListener("mouseenter", () => (hovering = true));
+      el.addEventListener("mouseleave", () => (hovering = false));
+
+      el.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        zoomDist = clamp(zoomDist * (e.deltaY < 0 ? 0.91 : 1.09), ZOOM_MIN, ZOOM_MAX);
+      }, { passive: false });
+
+      $("#zoomIn").addEventListener("click", () => {
+        zoomDist = clamp(zoomDist * 0.84, ZOOM_MIN, ZOOM_MAX);
+      });
+      $("#zoomOut").addEventListener("click", () => {
+        zoomDist = clamp(zoomDist * 1.19, ZOOM_MIN, ZOOM_MAX);
+      });
+      $("#resetView").addEventListener("click", () => {
+        state.focusedId = null;
+        Sidebar.setFocused(null);
+        autoRotateEnabled = true;
+        zoomDist = DEFAULT_ZOOM;
+        focusAnim = {
+          startQuat: earthGroup.quaternion.clone(),
+          targetQuat: initialQuat.clone(),
+          start: performance.now(),
+          dur: 800,
+        };
+      });
     }
 
-    function getVisibleFilteredFeatures() {
-      return state.features.filter((f) => (f.properties.mag || 0) >= state.minMag);
+    function handlePick(e) {
+      const rect = canvasEl.getBoundingClientRect();
+      pointerNDC.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      pointerNDC.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointerNDC, camera);
+      const targets = markerMeshes.map((m) => m.glow);
+      const hits = raycaster.intersectObjects(targets, false);
+      if (!hits.length) return;
+      const hit = markerMeshes.find((m) => m.glow === hits[0].object);
+      if (hit) focusQuake(hit.feature);
     }
 
     function focusQuake(feature) {
       state.focusedId = feature.id;
       const [lon, lat] = feature.geometry.coordinates;
-      state.autoRotate = false;
-      const target = [-lon, -lat];
-      const interpolator = d3.interpolate(projection.rotate(), [target[0], target[1], 0]);
-      const start = performance.now();
-      const dur = 900;
-      function step(now) {
-        const t = clamp((now - start) / dur, 0, 1);
-        const eased = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
-        projection.rotate(interpolator(eased));
-        redrawStatic();
-        redrawQuakes();
-        if (t < 1) requestAnimationFrame(step);
-      }
-      requestAnimationFrame(step);
+      const normal = latLonToVec3(lat, lon, 1).normalize();
+      const targetQuat = new THREE.Quaternion().setFromUnitVectors(normal, new THREE.Vector3(0, 0, 1));
+      focusAnim = {
+        startQuat: earthGroup.quaternion.clone(),
+        targetQuat,
+        start: performance.now(),
+        dur: 900,
+      };
+      autoRotateEnabled = false;
       Sidebar.setFocused(feature.id);
-    }
-
-    function wireInteraction() {
-      let v0, r0, dragStartXY;
-
-      const drag = d3.drag()
-        .on("start", (event) => {
-          state.dragging = true;
-          dragStartXY = [event.x, event.y];
-          r0 = projection.rotate();
-        })
-        .on("drag", (event) => {
-          const dx = event.x - dragStartXY[0];
-          const dy = event.y - dragStartXY[1];
-          const sensitivity = 0.28;
-          projection.rotate([
-            r0[0] + dx * sensitivity,
-            clamp(r0[1] - dy * sensitivity, -90, 90),
-          ]);
-          redrawStatic();
-          redrawQuakes();
-        })
-        .on("end", () => {
-          state.dragging = false;
-        });
-
-      svg.call(drag);
-
-      svg.on("wheel", (event) => {
-        event.preventDefault();
-        const factor = event.deltaY < 0 ? 1.08 : 0.93;
-        state.scale0 = clamp(state.scale0 * factor, 90, Math.min(width, height));
-        projection.scale(state.scale0);
-        redrawStatic();
-        redrawQuakes();
-      }, { passive: false });
-
-      svg.on("mouseenter", () => (state.hover = true));
-      svg.on("mouseleave", () => (state.hover = false));
-
-      $("#zoomIn").addEventListener("click", () => {
-        state.scale0 = clamp(state.scale0 * 1.15, 90, Math.min(width, height));
-        projection.scale(state.scale0);
-        redrawStatic(); redrawQuakes();
-      });
-      $("#zoomOut").addEventListener("click", () => {
-        state.scale0 = clamp(state.scale0 * 0.87, 90, Math.min(width, height));
-        projection.scale(state.scale0);
-        redrawStatic(); redrawQuakes();
-      });
-      $("#resetView").addEventListener("click", () => {
-        state.autoRotate = true;
-        state.focusedId = null;
-        Sidebar.setFocused(null);
-        state.scale0 = Math.min(width, height) / 2 - 26;
-        projection.scale(state.scale0);
-        redrawStatic(); redrawQuakes();
-      });
-    }
-
-    let lastTs = 0;
-    function tick(ts) {
-      const dt = ts - lastTs;
-      lastTs = ts;
-      if (state.autoRotate && !state.dragging && !state.hover && dt < 200) {
-        const r = projection.rotate();
-        projection.rotate([r[0] + dt * 0.006, r[1]]);
-        redrawStatic();
-        redrawQuakes();
-      }
-      requestAnimationFrame(tick);
-    }
-
-    function setCountries(geo) {
-      state.countries = geo;
-      state.countryCentroids = geo.features.map((f) => ({ f, centroid: d3.geoCentroid(f) }));
-      redrawStatic();
-    }
-
-    function refresh() {
-      redrawQuakes();
     }
 
     function focusById(id) {
@@ -444,7 +554,55 @@
       if (f) focusQuake(f);
     }
 
-    return { init, setCountries, refresh, redrawQuakes, focusById };
+    /* ---------------- render loop ---------------- */
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const dt = Math.min(clock.getDelta(), 0.06);
+      const now = performance.now();
+
+      cloudsMesh.rotation.y += dt * 0.0075;
+
+      markerMeshes.forEach((m) => {
+        const t = now / 1000;
+        const pulse = 0.86 + Math.sin(t * 2.1 + m.phase) * 0.16;
+        const isFocused = state.focusedId === m.id;
+        const focusBoost = isFocused ? 1.35 : 1;
+        m.glow.scale.set(m.baseGlowScale * pulse * focusBoost, m.baseGlowScale * pulse * focusBoost, 1);
+        if (isFocused) {
+          m.core.material.opacity = 1;
+        }
+        if (m.ring) {
+          const period = 2200;
+          const rt = ((now - m.ringStart) % period) / period;
+          const s = m.ring.userData.base * (1 + rt * 3.1);
+          m.ring.scale.set(s, s, 1);
+          m.ring.material.opacity = (1 - rt) * 0.85;
+        }
+      });
+
+      if (focusAnim) {
+        const t = clamp((now - focusAnim.start) / focusAnim.dur, 0, 1);
+        const eased = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+        earthGroup.quaternion.copy(focusAnim.startQuat).slerp(focusAnim.targetQuat, eased);
+        if (t >= 1) focusAnim = null;
+      } else if (autoRotateEnabled && !dragging && !hovering) {
+        earthGroup.quaternion.premultiply(
+          new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), dt * 0.052)
+        );
+      } else if (!dragging && (Math.abs(velYaw) > 0.00005 || Math.abs(velPitch) > 0.00005)) {
+        earthGroup.quaternion
+          .premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), velYaw))
+          .premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), velPitch));
+        velYaw *= 0.9;
+        velPitch *= 0.9;
+      }
+
+      camera.position.z += (zoomDist - camera.position.z) * 0.14;
+      renderer.render(scene, camera);
+    }
+
+    return { init, refresh, focusById };
   })();
 
   /* ---------------------------------------------------------------------
@@ -466,13 +624,13 @@
 
     function renderStats() {
       const feats = state.features.filter((f) => (f.properties.mag || 0) >= state.minMag);
-      $("#statCount").textContent = feats.length;
+      animateNumber($("#statCount"), feats.length);
 
       if (feats.length === 0) {
         $("#statMax").textContent = "—";
         $("#statMaxPlace").textContent = "";
         $("#statDepth").textContent = "—";
-        $("#statMajor").textContent = "0";
+        animateNumber($("#statMajor"), 0);
         return;
       }
 
@@ -484,11 +642,12 @@
         if ((f.properties.mag || 0) >= 5) majorCount++;
       }
 
-      $("#statMax").textContent = `M${(strongest.properties.mag || 0).toFixed(1)}`;
-      $("#statMax").style.color = magColor(strongest.properties.mag || 0);
+      const strongMag = strongest.properties.mag || 0;
+      animateNumber($("#statMax"), strongMag, { decimals: 1, prefix: "M" });
+      $("#statMax").style.color = magColor(strongMag);
       $("#statMaxPlace").textContent = strongest.properties.place || "—";
-      $("#statDepth").textContent = fmtDepth(depthSum / feats.length);
-      $("#statMajor").textContent = majorCount;
+      animateNumber($("#statDepth"), depthSum / feats.length, { decimals: 0, suffix: " km" });
+      animateNumber($("#statMajor"), majorCount);
     }
 
     function renderList() {
@@ -501,11 +660,16 @@
         return;
       }
 
+      const existingIds = new Set(
+        Array.from(list.querySelectorAll(".q-item")).map((el) => el.dataset.id)
+      );
+
       list.innerHTML = "";
       const frag = document.createDocumentFragment();
       for (const f of feats.slice(0, 200)) {
         const p = f.properties;
         const el = document.createElement("div");
+        const isFirstPaint = existingIds.size === 0;
         el.className = "q-item" + (state.focusedId === f.id ? " is-focused" : "");
         el.dataset.id = f.id;
         const isNew = Date.now() - p.time < NEW_QUAKE_WINDOW_MS;
@@ -520,6 +684,10 @@
             </div>
           </div>`;
         el.addEventListener("click", () => Globe.focusById(f.id));
+        if (!existingIds.has(f.id) && !isFirstPaint) {
+          el.classList.add("q-entering");
+          requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove("q-entering")));
+        }
         frag.appendChild(el);
       }
       list.appendChild(frag);
@@ -617,8 +785,7 @@
     function draw() {
       ctx.clearRect(0, 0, W, H);
 
-      // baseline grid
-      ctx.strokeStyle = "rgba(35,42,55,0.5)";
+      ctx.strokeStyle = "rgba(63,216,196,0.18)";
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(0, H / 2);
@@ -644,13 +811,15 @@
       ctx.stroke();
       ctx.shadowBlur = 0;
 
-      // leading dot
       const lastX = (BUFFER_LEN - 1) * step;
       const lastY = midY - buffer[BUFFER_LEN - 1] * ampScale;
       ctx.beginPath();
       ctx.fillStyle = "#ffd889";
-      ctx.arc(lastX, lastY, 2.6, 0, Math.PI * 2);
+      ctx.shadowColor = "rgba(255,178,56,0.9)";
+      ctx.shadowBlur = 8;
+      ctx.arc(lastX, lastY, 2.8, 0, Math.PI * 2);
       ctx.fill();
+      ctx.shadowBlur = 0;
     }
 
     return { init, setQuakes };
@@ -684,6 +853,9 @@
     pill.classList.remove("is-live", "is-cached", "is-error");
     pill.classList.add(`is-${mode}`);
     $("#statusText").textContent = text;
+
+    const liveChip = $("#liveChip");
+    if (liveChip) liveChip.classList.toggle("is-dim", mode !== "live");
   }
 
   function checkAlerts() {
@@ -757,13 +929,9 @@
     Globe.init();
     Ticker.init();
 
-    const countries = await loadCountries();
-    Globe.setCountries(countries);
-
     await refreshData();
     setInterval(refreshData, REFRESH_MS);
   }
 
-  // expose focus function used by Sidebar clicks (bound after Globe module IIFE)
   document.addEventListener("DOMContentLoaded", boot);
 })();
