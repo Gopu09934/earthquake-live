@@ -35,6 +35,24 @@
   const REFRESH_MS = 60_000;      // re-poll live feed every 60s
   const NEW_QUAKE_WINDOW_MS = 15 * 60_000; // "new" ripple badge window
 
+  const OCEAN_LABELS = [
+    { name: "PACIFIC OCEAN", lon: -150, lat: 5 },
+    { name: "PACIFIC OCEAN", lon: 170, lat: -10 },
+    { name: "ATLANTIC OCEAN", lon: -32, lat: 10 },
+    { name: "INDIAN OCEAN", lon: 75, lat: -25 },
+    { name: "ARCTIC OCEAN", lon: 0, lat: 85 },
+    { name: "SOUTHERN OCEAN", lon: 0, lat: -68 },
+  ];
+
+  const REGION_LABELS = [
+    { name: "NORTH AMERICA", lon: -100, lat: 45 },
+    { name: "SOUTH AMERICA", lon: -60, lat: -15 },
+    { name: "EUROPE", lon: 15, lat: 52 },
+    { name: "AFRICA", lon: 20, lat: 5 },
+    { name: "ASIA", lon: 95, lat: 50 },
+    { name: "OCEANIA", lon: 140, lat: -25 },
+  ];
+
   /* ---------------------------------------------------------------------
      State
      --------------------------------------------------------------------- */
@@ -139,7 +157,7 @@
      --------------------------------------------------------------------- */
 
   const Globe = (() => {
-    let svg, gGraticule, gCountries, gQuakes, projection, path, geoGraticule;
+    let svg, gGraticule, gCountries, gRegionLabels, gOceanLabels, gCountryLabels, gQuakes, projection, path, geoGraticule;
     let width = 0, height = 0;
 
     function size() {
@@ -170,6 +188,9 @@
       gGraticule = svg.append("path").attr("class", "graticule")
         .attr("fill", "none").attr("stroke", "#1c2431").attr("stroke-width", 0.6);
       gCountries = svg.append("g").attr("class", "countries");
+      gRegionLabels = svg.append("g").attr("class", "region-labels");
+      gOceanLabels = svg.append("g").attr("class", "ocean-labels");
+      gCountryLabels = svg.append("g").attr("class", "country-labels");
       gQuakes = svg.append("g").attr("class", "quakes");
       svg.append("circle").attr("class", "sphere-outline")
         .attr("fill", "none").attr("stroke", "#2a3244").attr("stroke-width", 1.2);
@@ -193,6 +214,65 @@
         .attr("stroke", "#4a5878")
         .attr("stroke-width", 0.6)
         .attr("d", path);
+
+      // Region (continent) labels — coarse background text, always shown when facing us
+      gRegionLabels.selectAll("text")
+        .data(REGION_LABELS.filter((d) => visible([d.lon, d.lat])), (d) => d.name)
+        .join("text")
+        .text((d) => d.name)
+        .attr("x", (d) => projection([d.lon, d.lat])[0])
+        .attr("y", (d) => projection([d.lon, d.lat])[1])
+        .attr("text-anchor", "middle")
+        .attr("font-size", 13)
+        .attr("font-weight", 600)
+        .attr("letter-spacing", "1.5px")
+        .attr("fill", "#6b7aa0")
+        .attr("stroke", "#0a0d14")
+        .attr("stroke-width", 3)
+        .attr("paint-order", "stroke")
+        .attr("opacity", 0.6)
+        .style("pointer-events", "none");
+
+      // Ocean labels — same idea, italic to read as water rather than landmass
+      gOceanLabels.selectAll("text")
+        .data(OCEAN_LABELS.filter((d) => visible([d.lon, d.lat])), (d) => d.name + d.lon)
+        .join("text")
+        .text((d) => d.name)
+        .attr("x", (d) => projection([d.lon, d.lat])[0])
+        .attr("y", (d) => projection([d.lon, d.lat])[1])
+        .attr("text-anchor", "middle")
+        .attr("font-size", 11)
+        .attr("font-style", "italic")
+        .attr("letter-spacing", "1px")
+        .attr("fill", "#4d5f85")
+        .attr("stroke", "#0a0d14")
+        .attr("stroke-width", 3)
+        .attr("paint-order", "stroke")
+        .attr("opacity", 0.65)
+        .style("pointer-events", "none");
+
+      // Country name labels — only for countries with enough projected screen
+      // area to stay legible; fades/grows in as you zoom toward a country.
+      const labelData = (state.countryCentroids || [])
+        .map((d) => ({ ...d, area: path.area(d.f) }))
+        .filter((d) => d.area > 300 && visible(d.centroid))
+        .sort((a, b) => b.area - a.area)
+        .slice(0, 60);
+
+      gCountryLabels.selectAll("text")
+        .data(labelData, (d) => d.f.properties.iso_a3 || d.f.id)
+        .join("text")
+        .text((d) => d.f.properties.name)
+        .attr("x", (d) => projection(d.centroid)[0])
+        .attr("y", (d) => projection(d.centroid)[1])
+        .attr("text-anchor", "middle")
+        .attr("font-size", (d) => clamp(Math.sqrt(d.area) / 9, 8, 14))
+        .attr("fill", "#c3cee4")
+        .attr("stroke", "#0a0d14")
+        .attr("stroke-width", 2.5)
+        .attr("paint-order", "stroke")
+        .attr("opacity", (d) => clamp((d.area - 300) / 4000, 0.4, 0.95))
+        .style("pointer-events", "none");
     }
 
     function visible(coords) {
@@ -351,6 +431,7 @@
 
     function setCountries(geo) {
       state.countries = geo;
+      state.countryCentroids = geo.features.map((f) => ({ f, centroid: d3.geoCentroid(f) }));
       redrawStatic();
     }
 
