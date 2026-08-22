@@ -189,8 +189,8 @@
       gCountries.selectAll("path")
         .data(state.countries ? state.countries.features : [], (d) => d.properties && d.properties.iso_a3 || d.id)
         .join("path")
-        .attr("fill", "#1a2130")
-        .attr("stroke", "#2c3547")
+        .attr("fill", "#2e3852")
+        .attr("stroke", "#4a5878")
         .attr("stroke-width", 0.6)
         .attr("d", path);
     }
