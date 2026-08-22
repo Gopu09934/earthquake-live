@@ -35,19 +35,26 @@
   <!-- ===================== MAIN SPLIT ===================== -->
   <div class="main">
 
-    <!-- ---------- MAP ---------- -->
+    <!-- ---------- MAP / GLOBE ---------- -->
     <section class="map-panel" id="mapPanel">
-      <svg class="globe-svg" id="globe"></svg>
+      <canvas class="globe-canvas" id="globeCanvas"></canvas>
 
-      <div class="map-controls">
+      <div class="live-chip" id="liveChip">
+        <span class="live-chip-dot"></span>
+        <span>LIVE</span>
+        <span class="live-chip-sep">·</span>
+        <span>USGS GLOBAL</span>
+      </div>
+
+      <div class="map-controls glass">
         <button class="map-ctl-btn" id="zoomIn" title="Zoom in">+</button>
         <button class="map-ctl-btn" id="zoomOut" title="Zoom out">−</button>
         <button class="map-ctl-btn" id="resetView" title="Reset view">⌂</button>
       </div>
 
-      <div class="map-legend">
+      <div class="map-legend glass">
         <div class="lg-title">Magnitude</div>
-        <div class="lg-row"><span class="lg-dot" style="background:#5c6478"></span>M2.5–3.9</div>
+        <div class="lg-row"><span class="lg-dot" style="background:#7d8aa8"></span>M2.5–3.9</div>
         <div class="lg-row"><span class="lg-dot" style="background:#3fd8c4"></span>M4.0–4.9</div>
         <div class="lg-row"><span class="lg-dot" style="background:#ffb238"></span>M5.0–5.9</div>
         <div class="lg-row"><span class="lg-dot" style="background:#ff5468"></span>M6.0+</div>
@@ -62,20 +69,32 @@
       <div class="sb-section">
         <div class="sb-title">Snapshot <span id="snapshotWindow">— Past Day</span></div>
         <div class="stats-grid">
-          <div class="stat-box">
+          <div class="stat-box glass">
+            <div class="stat-icon amber">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>
+            </div>
             <div class="num amber" id="statCount">–</div>
             <div class="lbl">Events</div>
           </div>
-          <div class="stat-box">
+          <div class="stat-box glass">
+            <div class="stat-icon teal">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z"/></svg>
+            </div>
             <div class="num" id="statMax">–</div>
             <div class="lbl">Strongest</div>
             <div class="sub" id="statMaxPlace">&nbsp;</div>
           </div>
-          <div class="stat-box">
+          <div class="stat-box glass">
+            <div class="stat-icon cyan">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v14M6 11l6 6 6-6"/><path d="M4 21h16"/></svg>
+            </div>
             <div class="num" id="statDepth">–</div>
             <div class="lbl">Avg Depth</div>
           </div>
-          <div class="stat-box">
+          <div class="stat-box glass">
+            <div class="stat-icon red">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 2 20h20L12 2Z"/><path d="M12 9v5M12 17h.01"/></svg>
+            </div>
             <div class="num red" id="statMajor">–</div>
             <div class="lbl">M5.0+</div>
           </div>
@@ -106,7 +125,7 @@
   </div>
 
   <!-- ===================== TICKER ===================== -->
-  <footer class="ticker">
+  <footer class="ticker glass">
     <div class="ticker-label">Seismograph · composite signal</div>
     <div class="ticker-readout">Last sync <b id="syncAgo">–</b></div>
     <canvas id="tickerCanvas"></canvas>
@@ -114,7 +133,7 @@
 
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>
