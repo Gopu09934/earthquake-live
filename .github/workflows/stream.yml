@@ -8,7 +8,7 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "0 */6 * * *"   # GitHub Actions caps a run at 6h; this + restart-stream.yml keep it looping
+    - cron: "0 */5 * * *"   # GitHub Actions caps a run at 6h; this + restart-stream.yml keep it looping
 
 concurrency:
   group: eq-stream-job
